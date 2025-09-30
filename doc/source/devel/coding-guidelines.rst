@@ -166,7 +166,7 @@ Naming class methods
 
 Methods (functions associated with a specific class) are generally
 named beginning with a lower-case letter, and underscores for spacing.
-Public methods end in an underscore ``_``.
+Private methods end in an underscore ``_``.
 
 +---------------------------------+-------------------------+
 | Method type                     | Method name             |

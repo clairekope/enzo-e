@@ -688,6 +688,8 @@ Method * EnzoProblem::create_method_
       method = new EnzoMethodDistributedFeedback(p_group);
     } else if (flavor == "STARSS" || flavor == "starss") {
       method = new EnzoMethodFeedbackSTARSS(p_group);
+    } else if (flavor == "mechanical") {
+      method = new EnzoMethodFeedbackMechanical(p_group);
     }  else { // does not do anything
       method = new EnzoMethodFeedback(p_group);
     }

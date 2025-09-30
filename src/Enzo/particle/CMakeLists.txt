@@ -28,6 +28,7 @@ add_library(Enzo_particle
   feedback/EnzoMethodDistributedFeedback.cpp feedback/EnzoMethodDistributedFeedback.hpp
   feedback/EnzoMethodFeedback.cpp feedback/EnzoMethodFeedback.hpp
   feedback/EnzoMethodFeedbackSTARSS.cpp feedback/EnzoMethodFeedbackSTARSS.hpp
+  feedback/EnzoMethodFeedbackMechanical.cpp feedback/EnzoMethodFeedbackMechanical.hpp
 )
 add_library(Enzo::particle ALIAS Enzo_particle)
 

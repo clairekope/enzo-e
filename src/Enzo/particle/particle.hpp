@@ -50,5 +50,6 @@
 #include "particle/feedback/EnzoMethodDistributedFeedback.hpp"
 #include "particle/feedback/EnzoMethodFeedback.hpp"
 #include "particle/feedback/EnzoMethodFeedbackSTARSS.hpp"
+#include "particle/feedback/EnzoMethodFeedbackMechanical.hpp"
 
 #endif /* ENZO_PARTICLE_PARTICLE_HPP */
