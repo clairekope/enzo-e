@@ -94,23 +94,30 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
   min_nsn_per_timestep_  = p.value_integer("nsn_per_timestep",1000);
 
   // Initialize temporary fields
-  i_dep_mass  = cello::field_descr()->insert_temporary();
+  i_nsn = cello::field_descr()->insert_temporary();
+  i_dep_mass = cello::field_descr()->insert_temporary();
   i_dep_metl = cello::field_descr()->insert_temporary();
   i_dep_snii = cello::field_descr()->insert_temporary();
   i_dep_snia = cello::field_descr()->insert_temporary();
   i_dep_px = cello::field_descr()->insert_temporary();
   i_dep_py = cello::field_descr()->insert_temporary();
   i_dep_pz = cello::field_descr()->insert_temporary();
-  i_nsn = cello::field_descr()->insert_temporary();
 
-  i_nsn_a  = cello::field_descr()->insert_temporary();
-  i_dep_mass_a = cello::field_descr()->insert_temporary();
-  i_dep_metl_a = cello::field_descr()->insert_temporary();
-  i_dep_snii_a = cello::field_descr()->insert_temporary();
-  i_dep_snia_a = cello::field_descr()->insert_temporary();
-  i_dep_px_a = cello::field_descr()->insert_temporary();
-  i_dep_py_a = cello::field_descr()->insert_temporary();
-  i_dep_pz_a= cello::field_descr()->insert_temporary();
+  i_d_dep  = cello::field_descr()->insert_temporary();
+  i_te_dep = cello::field_descr()->insert_temporary();
+  i_ge_dep = cello::field_descr()->insert_temporary();
+  i_mf_dep = cello::field_descr()->insert_temporary();
+  i_vx_dep = cello::field_descr()->insert_temporary();
+  i_vy_dep = cello::field_descr()->insert_temporary();
+  i_vz_dep = cello::field_descr()->insert_temporary();
+
+  i_d_dep_a  = cello::field_descr()->insert_temporary();
+  i_te_dep_a = cello::field_descr()->insert_temporary();
+  i_ge_dep_a = cello::field_descr()->insert_temporary();
+  i_mf_dep_a = cello::field_descr()->insert_temporary();
+  i_vx_dep_a = cello::field_descr()->insert_temporary();
+  i_vy_dep_a = cello::field_descr()->insert_temporary();
+  i_vz_dep_a = cello::field_descr()->insert_temporary();
 
   // Deposition across grid boundaries is handled using refresh with set_accumulate=true.
   // The set_accumulate flag tells Cello to include ghost zones in the refresh operation,
@@ -128,15 +135,14 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
 
   refresh_fb->set_accumulate(true);
 
-  refresh_fb->add_field_src_dst(i_dep_mass, i_dep_mass_a);
-  refresh_fb->add_field_src_dst(i_dep_metl, i_dep_metl_a);
-  refresh_fb->add_field_src_dst(i_dep_snii, i_dep_snii_a);
-  refresh_fb->add_field_src_dst(i_dep_snia, i_dep_snia_a);
-  refresh_fb->add_field_src_dst(i_dep_px, i_dep_px_a);
-  refresh_fb->add_field_src_dst(i_dep_py, i_dep_py_a);
-  refresh_fb->add_field_src_dst(i_dep_pz, i_dep_pz_a);
-  refresh_fb->add_field_src_dst(i_nsn, i_nsn_a);
- 
+  refresh_fb->add_field_src_dst(i_d_dep,  i_d_dep_a);
+  refresh_fb->add_field_src_dst(i_te_dep, i_te_dep_a);
+  refresh_fb->add_field_src_dst(i_ge_dep, i_ge_dep_a);
+  refresh_fb->add_field_src_dst(i_mf_dep, i_mf_dep_a);
+  refresh_fb->add_field_src_dst(i_vx_dep, i_vx_dep_a);
+  refresh_fb->add_field_src_dst(i_vy_dep, i_vy_dep_a);
+  refresh_fb->add_field_src_dst(i_vz_dep, i_vz_dep_a);
+
   refresh_fb->set_callback(CkIndex_EnzoBlock::p_method_feedback_mech_end());
 
   return;
@@ -150,27 +156,38 @@ void EnzoMethodFeedbackMechanical::pup (PUP::er &p)
 
   Method::pup(p);
 
+  // parameters
   p | stochastic_;
   p | ejecta_mass_fraction_;
   p | ejecta_metal_fraction_;
   p | min_nsn_per_timestep_;
 
+  // temporary yield fields
   p | i_nsn;
-  p | i_nsn_a;
   p | i_dep_mass;
-  p | i_dep_mass_a;
   p | i_dep_metl;
-  p | i_dep_metl_a;
   p | i_dep_snii;
-  p | i_dep_snii_a; 
   p | i_dep_snia;
-  p | i_dep_snia_a;
   p | i_dep_px;
-  p | i_dep_px_a;
   p | i_dep_py;
-  p | i_dep_py_a;
   p | i_dep_pz;
-  p | i_dep_pz_a;
+
+  // accumulation fields
+  p | i_d_dep;
+  p | i_te_dep;
+  p | i_ge_dep;
+  p | i_mf_dep;
+  p | i_vx_dep;
+  p | i_vy_dep;
+  p | i_vz_dep;
+
+  p | i_d_dep_a;
+  p | i_te_dep_a;
+  p | i_ge_dep_a;
+  p | i_mf_dep_a;
+  p | i_vx_dep_a;
+  p | i_vy_dep_a;
+  p | i_vz_dep_a;
 
   return;
 }
@@ -185,15 +202,6 @@ double EnzoMethodFeedbackMechanical::timestep (Block * block) throw()
   
   // return 1000.0 * enzo_constants::yr_s / enzo_units->time();
   return std::numeric_limits<double>::max();
-}
-
-void EnzoBlock::p_method_feedback_mech_end() 
-{  
-  EnzoMethodFeedbackMechanical * method = static_cast<EnzoMethodFeedbackMechanical*> (this->method());
-  //method->add_accumulate_fields(this);
-  
-  compute_done();
-  return;
 }
 
 void EnzoMethodFeedbackMechanical::compute (Block * block) throw()
@@ -259,12 +267,12 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
     CelloView<enzo_float,3> ge = field.view<enzo_float>("internal_energy");
     CelloView<enzo_float,3> mf = field.view<enzo_float>("metal_density");
 
-    allocate_temporary_(enzo_block);
+    // allocate temporary fields
+    allocate_temporary_yields_(enzo_block);
+    allocate_temporary_fluids_(enzo_block);
 
     // initialize temporary fields as zero
-    CelloView<enzo_float,3> n_dep   = field.view<enzo_float>(i_nsn);
-    CelloView<enzo_float,3> n_dep_a = field.view<enzo_float>(i_nsn_a);
-
+    CelloView<enzo_float,3> n_dep  = field.view<enzo_float>(i_nsn);
     CelloView<enzo_float,3> m_dep  = field.view<enzo_float>(i_dep_mass);
     CelloView<enzo_float,3> mz_dep = field.view<enzo_float>(i_dep_metl);
     CelloView<enzo_float,3> mzii_dep = field.view<enzo_float>(i_dep_snii);
@@ -273,18 +281,26 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
     CelloView<enzo_float,3> py_dep = field.view<enzo_float>(i_dep_py);
     CelloView<enzo_float,3> pz_dep = field.view<enzo_float>(i_dep_pz);
 
-    CelloView<enzo_float,3> m_dep_a  = field.view<enzo_float>(i_dep_mass_a);
-    CelloView<enzo_float,3> mz_dep_a = field.view<enzo_float>(i_dep_metl_a);
-    CelloView<enzo_float,3> mzii_dep_a = field.view<enzo_float>(i_dep_snii_a);
-    CelloView<enzo_float,3> mzia_dep_a = field.view<enzo_float>(i_dep_snia_a);
-    CelloView<enzo_float,3> px_dep_a = field.view<enzo_float>(i_dep_px_a);
-    CelloView<enzo_float,3> py_dep_a = field.view<enzo_float>(i_dep_py_a);
-    CelloView<enzo_float,3> pz_dep_a = field.view<enzo_float>(i_dep_pz_a);
+    CelloView<enzo_float,3> d_dep  = field.view<enzo_float>(i_d_dep);
+    CelloView<enzo_float,3> te_dep = field.view<enzo_float>(i_te_dep);
+    CelloView<enzo_float,3> ge_dep = field.view<enzo_float>(i_ge_dep);
+    CelloView<enzo_float,3> mf_dep = field.view<enzo_float>(i_mf_dep);
+    CelloView<enzo_float,3> vx_dep = field.view<enzo_float>(i_vx_dep);
+    CelloView<enzo_float,3> vy_dep = field.view<enzo_float>(i_vy_dep);
+    CelloView<enzo_float,3> vz_dep = field.view<enzo_float>(i_vz_dep);
+
+    CelloView<enzo_float,3> d_dep_a  = field.view<enzo_float>(i_d_dep_a);
+    CelloView<enzo_float,3> te_dep_a = field.view<enzo_float>(i_te_dep_a);
+    CelloView<enzo_float,3> ge_dep_a = field.view<enzo_float>(i_ge_dep_a);
+    CelloView<enzo_float,3> mf_dep_a = field.view<enzo_float>(i_mf_dep_a);
+    CelloView<enzo_float,3> vx_dep_a = field.view<enzo_float>(i_vx_dep_a);
+    CelloView<enzo_float,3> vy_dep_a = field.view<enzo_float>(i_vy_dep_a);
+    CelloView<enzo_float,3> vz_dep_a = field.view<enzo_float>(i_vz_dep_a);
 
     for (int iz=gz; iz<mz-gz; iz++) {
       for (int iy=gy; iy<my-gy; iy++) {
         for (int ix=gx; ix<my-gx; ix++) {
-          n_dep(ix, iy, iz) = 0.0;
+          n_dep (ix, iy, iz) = 0.0;
           m_dep (ix, iy, iz) = 0.0;
           mz_dep(ix, iy, iz) = 0.0;
           mzii_dep(ix, iy, iz) = 0.0;
@@ -292,15 +308,22 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           px_dep(ix, iy, iz) = 0.0;
           py_dep(ix, iy, iz) = 0.0;
           pz_dep(ix, iy, iz) = 0.0;
-          
-          n_dep_a(ix, iy, iz) = 0.0;
-          m_dep_a(ix, iy, iz) = 0.0;
-          mz_dep_a(ix, iy, iz) = 0.0;
-          mzii_dep_a(ix, iy, iz) = 0.0;
-          mzia_dep_a(ix, iy, iz) = 0.0;
-          px_dep_a(ix, iy, iz) = 0.0;
-          py_dep_a(ix, iy, iz) = 0.0;
-          pz_dep_a(ix, iy, iz) = 0.0;
+
+          d_dep (ix, iy, iz) = 0.0;
+          te_dep(ix, iy, iz) = 0.0;
+          ge_dep(ix, iy, iz) = 0.0;
+          mf_dep(ix, iy, iz) = 0.0;
+          vx_dep(ix, iy, iz) = 0.0;
+          vy_dep(ix, iy, iz) = 0.0;
+          vz_dep(ix, iy, iz) = 0.0;
+
+          d_dep_a (ix, iy, iz) = 0.0;
+          te_dep_a(ix, iy, iz) = 0.0;
+          ge_dep_a(ix, iy, iz) = 0.0;
+          mf_dep_a(ix, iy, iz) = 0.0;
+          vx_dep_a(ix, iy, iz) = 0.0;
+          vy_dep_a(ix, iy, iz) = 0.0;
+          vz_dep_a(ix, iy, iz) = 0.0;
         }
       }
     }
@@ -455,6 +478,17 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
       } // end particle loop
     } // end batch loop
 
+    // Now, iterate over yield grids and apply to actual fields
+    for (int iz=gz; iz<mz-gz; iz++) {
+      for (int iy=gy; iy<my-gy; iy++) {
+        for (int ix=gx; ix<my-gx; ix++) {
+        }
+      }
+    }
+
+    // Deallocate yield fields; keep fluid fields for the refresh
+    deallocate_temporary_yields_(enzo_block);
+
     // refresh
     cello::refresh(ir_feedback_)->set_active(enzo_block->is_leaf());
     enzo_block->refresh_start(ir_feedback_, CkIndex_EnzoBlock::p_method_feedback_mech_end());
@@ -462,6 +496,126 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
   } // end check for particles
 }
 
+void EnzoBlock::p_method_feedback_mech_end() 
+{  
+  EnzoMethodFeedbackMechanical * method = static_cast<EnzoMethodFeedbackMechanical*> (this->method());
+  method->add_accumulate_fields(this);
+  
+  compute_done();
+  return;
+}
+
+void EnzoMethodFeedbackMechanical::add_accumulate_fields(EnzoBlock * enzo_block) throw()
+{
+  Field field = enzo_block->data()->field();
+
+  int mx, my, mz, gx, gy, gz, nx, ny, nz;
+  double xm, ym, zm, xp, yp, zp, hx, hy, hz;
+  field.size(&nx,&ny,&nz);
+  field.ghost_depth(0,&gx,&gy,&gz);
+  enzo_block->data()->lower(&xm,&ym,&zm);
+  enzo_block->data()->upper(&xp,&yp,&zp);
+  field.cell_width(xm,xp,&hx,ym,yp,&hy,zm,zp,&hz);
+
+  mx = nx + 2*gx;
+  my = ny + 2*gy;
+  mz = nz + 2*gz;
+
+  // add accumulated values over and reset them to zero
+
+  CelloView<enzo_float,3> d  = field.view<enzo_float>("density");
+  CelloView<enzo_float,3> te = field.view<enzo_float>("total_energy");
+  CelloView<enzo_float,3> ge = field.view<enzo_float>("internal_energy");
+  CelloView<enzo_float,3> mf = field.view<enzo_float>("metal_density");
+  CelloView<enzo_float,3> vx = field.view<enzo_float>("velocity_x");
+  CelloView<enzo_float,3> vy = field.view<enzo_float>("velocity_y");
+  CelloView<enzo_float,3> vz = field.view<enzo_float>("velocity_z");
+  
+  CelloView<enzo_float,3> d_dep  = field.view<enzo_float>(i_d_dep);
+  CelloView<enzo_float,3> te_dep = field.view<enzo_float>(i_te_dep);
+  CelloView<enzo_float,3> ge_dep = field.view<enzo_float>(i_ge_dep);
+  CelloView<enzo_float,3> mf_dep = field.view<enzo_float>(i_mf_dep);
+  CelloView<enzo_float,3> vx_dep = field.view<enzo_float>(i_vx_dep);
+  CelloView<enzo_float,3> vy_dep = field.view<enzo_float>(i_vy_dep);
+  CelloView<enzo_float,3> vz_dep = field.view<enzo_float>(i_vz_dep);
+
+  CelloView<enzo_float,3> d_dep_a  = field.view<enzo_float>(i_d_dep_a);
+  CelloView<enzo_float,3> te_dep_a = field.view<enzo_float>(i_te_dep_a);
+  CelloView<enzo_float,3> ge_dep_a = field.view<enzo_float>(i_ge_dep_a);
+  CelloView<enzo_float,3> mf_dep_a = field.view<enzo_float>(i_mf_dep_a);
+  CelloView<enzo_float,3> vx_dep_a = field.view<enzo_float>(i_vx_dep_a);
+  CelloView<enzo_float,3> vy_dep_a = field.view<enzo_float>(i_vy_dep_a);
+  CelloView<enzo_float,3> vz_dep_a = field.view<enzo_float>(i_vz_dep_a);
+
+  EnzoUnits * enzo_units = enzo::units();
+  double cell_volume_code = hx*hy*hz;
+  double cell_volume_cgs = cell_volume_code * enzo_units->volume();
+  double rhounit = enzo_units->density();
+
+  double maxEvacFraction = 0.75; // TODO: make this a parameter
+
+  // multiply by this value to convert cell density (in code units)
+  // to cell mass in Msun
+  double rho_to_m = rhounit*cell_volume_cgs / enzo_constants::mass_solar;
+
+  for (int iz=gz; iz<nz+gz; iz++){
+    for (int iy=gy; iy<ny+gy; iy++){
+      for (int ix=gx; ix<nx+gx; ix++){
+
+        if (d_dep_a(ix,iy,iz) != 0) { // if any deposition
+
+          double d_old = d(ix,iy,iz);
+          
+          // Could have a race condition here where if one particle updates the density of a cell,
+          // that update won't get communicated to the other block until the end of the cycle.
+          // In rare cases, this could result in a cell having a negative density because "centralMass"
+          // and "centralMetals" in deposit_feedback() will be overpredicted going into the negative-mass
+          // CiC for clearing out gas from the central cell. Catch this case by setting density
+          // to (1-maxEvacFraction) * density[i] and metal_density to (1-maxEvacFraction) * metal_density[i] if
+          // either go negative.
+
+          if (d(ix,iy,iz) + d_dep_a(ix,iy,iz) < 0) {
+            d(ix,iy,iz) *= 1-maxEvacFraction;
+          }
+          else {
+            d(ix,iy,iz) += d_dep_a(ix,iy,iz);
+          }
+
+          if (mf(ix,iy,iz) + mf_dep_a(ix,iy,iz) < 0) {
+            mf(ix,iy,iz) *= 1-maxEvacFraction;
+          }
+          else {
+            mf(ix,iy,iz) += mf_dep_a(ix,iy,iz);
+          }
+
+          double d_new = d(ix,iy,iz);
+          double inv_dens_new = 1.0/d_new;
+
+          double M_scale_tot = d_new / d_old;
+
+          // Here, te_dep_a and ge_dep_a are carrying "energy density" (not specific energy)
+          // and vx_dep_a, vy_dep_a, and vy_dep_a are carrying velocity of the shell (not momentum density)
+ 
+          te(ix,iy,iz) = te(ix,iy,iz) / M_scale_tot + std::max( (double) te_dep_a(ix,iy,iz), 0.0) * inv_dens_new; 
+          ge(ix,iy,iz) = ge(ix,iy,iz) / M_scale_tot + std::max( (double) ge_dep_a(ix,iy,iz), 0.0) * inv_dens_new;
+          vx(ix,iy,iz) += vx_dep_a(ix,iy,iz);
+          vy(ix,iy,iz) += vy_dep_a(ix,iy,iz);
+          vz(ix,iy,iz) += vz_dep_a(ix,iy,iz);
+
+          // rescale color fields to account for new densities
+          //EnzoMethodStarMaker::rescale_densities(enzo_block, i, M_scale_tot);
+          // undo rescaling of metal_density field
+          mf(ix,iy,iz) /= M_scale_tot;
+
+         }        
+        
+      }
+    }
+  }
+
+  deallocate_temporary_fluids_(enzo_block);
+  return;
+}
 
 // ----------------------------------------------------------------------------
 
