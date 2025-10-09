@@ -63,9 +63,9 @@ protected:
     field.allocate_temporary(i_dep_metl);
     field.allocate_temporary(i_dep_snii);
     field.allocate_temporary(i_dep_snia);
-    field.allocate_temporary(i_dep_px);
-    field.allocate_temporary(i_dep_py);
-    field.allocate_temporary(i_dep_pz);
+    field.allocate_temporary(i_dep_vxp);
+    field.allocate_temporary(i_dep_vyp);
+    field.allocate_temporary(i_dep_vzp);
   }
 
   void deallocate_temporary_yields_(EnzoBlock * enzo_block)
@@ -76,9 +76,9 @@ protected:
     field.deallocate_temporary(i_dep_metl);
     field.deallocate_temporary(i_dep_snii);
     field.deallocate_temporary(i_dep_snia);
-    field.deallocate_temporary(i_dep_px);
-    field.deallocate_temporary(i_dep_py);
-    field.deallocate_temporary(i_dep_pz);
+    field.deallocate_temporary(i_dep_vxp);
+    field.deallocate_temporary(i_dep_vyp);
+    field.deallocate_temporary(i_dep_vzp);
   }
 
   void allocate_temporary_fluids_(EnzoBlock * enzo_block)
@@ -87,7 +87,7 @@ protected:
     field.allocate_temporary(i_d_dep);
     field.allocate_temporary(i_te_dep);
     field.allocate_temporary(i_ge_dep);
-    field.allocate_temporary(i_mf_dep);
+    field.allocate_temporary(i_md_dep);
     field.allocate_temporary(i_vx_dep);
     field.allocate_temporary(i_vy_dep);
     field.allocate_temporary(i_vz_dep);
@@ -95,7 +95,7 @@ protected:
     field.allocate_temporary(i_d_dep_a);
     field.allocate_temporary(i_te_dep_a);
     field.allocate_temporary(i_ge_dep_a);
-    field.allocate_temporary(i_mf_dep_a);
+    field.allocate_temporary(i_md_dep_a);
     field.allocate_temporary(i_vx_dep_a);
     field.allocate_temporary(i_vy_dep_a);
     field.allocate_temporary(i_vz_dep_a);
@@ -107,7 +107,7 @@ protected:
     field.deallocate_temporary(i_d_dep);
     field.deallocate_temporary(i_te_dep);
     field.deallocate_temporary(i_ge_dep);
-    field.deallocate_temporary(i_mf_dep);
+    field.deallocate_temporary(i_md_dep);
     field.deallocate_temporary(i_vx_dep);
     field.deallocate_temporary(i_vy_dep);
     field.deallocate_temporary(i_vz_dep);
@@ -115,7 +115,7 @@ protected:
     field.deallocate_temporary(i_d_dep_a);
     field.deallocate_temporary(i_te_dep_a);
     field.deallocate_temporary(i_ge_dep_a);
-    field.deallocate_temporary(i_mf_dep_a);
+    field.deallocate_temporary(i_md_dep_a);
     field.deallocate_temporary(i_vx_dep_a);
     field.deallocate_temporary(i_vy_dep_a);
     field.deallocate_temporary(i_vz_dep_a);
@@ -123,27 +123,32 @@ protected:
 
   // configuration parameters (these are directly set by the user)
   bool stochastic_;
+  bool pre_sne_;
   double ejecta_mass_fraction_;
   double ejecta_metal_fraction_;
   int min_nsn_per_timestep_;
+  double momentum_mult_;
 
   // Refresh ID
   int ir_feedback_;
 
   // deposit field id's
-  // _a fields are for accumulation
+  // these are used for figuring out feedback
   int i_nsn;
   int i_dep_mass;
   int i_dep_metl;
   int i_dep_snii;
   int i_dep_snia;
-  int i_dep_px;
-  int i_dep_py;
-  int i_dep_pz;
+  int i_dep_vxp;
+  int i_dep_vyp;
+  int i_dep_vzp;
+  
+  // these are used for accumulating across ghost zones
+  // _a fields are for accumulation
   int i_d_dep , i_d_dep_a;
   int i_te_dep, i_te_dep_a;
   int i_ge_dep, i_ge_dep_a;
-  int i_mf_dep, i_mf_dep_a;
+  int i_md_dep, i_md_dep_a;
   int i_vx_dep, i_vx_dep_a;
   int i_vy_dep, i_vy_dep_a;
   int i_vz_dep, i_vz_dep_a;
