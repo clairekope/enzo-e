@@ -56,18 +56,19 @@ void draw_stochastic(double &nsn_ii, double &nsn_ia) {
 
 }
 
-void get_mom_per_cell(const CelloView<enzo_float,3> &d,
-                      double mass_per_cell,
-                      int distcells,
-                      double mom_per_cell[3][3][3],
-                      double energy_per_cell[3][3][3],
-                      double nsn,
-                      double d_fbck_cell,
-                      double vol_cell, double vol_cell_oct,
-                      double n_avg, double Z_floor,
-                      int ic, int jc, int kc,
-                      double mom_mult)
-{
+void compute_snii_energy_momentum(
+  const CelloView<const enzo_float,3> &d,  // pointer & values are const
+  double mass_per_cell,
+  int distcells,
+  double mom_per_cell[3][3][3],
+  double energy_per_cell[3][3][3],
+  double nsn,
+  double d_fbck_cell,
+  double vol_cell, double vol_cell_oct,
+  double n_avg, double Z_floor,
+  int ic, int jc, int kc,
+  double mom_mult
+) {
   EnzoUnits * enzo_units = enzo::units();
   
   double dunit = enzo_units->density();
@@ -168,13 +169,16 @@ void get_mom_per_cell(const CelloView<enzo_float,3> &d,
   return;
 }
 
-void transform_momentum(const CelloView<enzo_float,3> &d,
-                        CelloView<enzo_float,3> &u,
-                        CelloView<enzo_float,3> &v,
-                        CelloView<enzo_float,3> &w,
-                        double up, double vp, double wp,
-                        int ic, int jc, int kc, int idir)
-{
+void transform_momentum(
+  const CelloView<const enzo_float,3> &d, // pointer & values are const
+  const CelloView<enzo_float,3> &u,       // just pointer is const
+  const CelloView<enzo_float,3> &v,
+  const CelloView<enzo_float,3> &w,
+  double up, double vp, double wp,
+  const int ic, const int jc, const int kc, const int idir
+) {
+  // Converts velocity in the grid frame to momentum in the explosion frame
+  // and back again:
   // idir == +1 : convert vel -> mom  : (u - up) * rho
   // idir == -1 : convert mom -> vel  : (u / rho) + up
   if (idir != +1 && idir != -1) {
@@ -205,6 +209,174 @@ void transform_momentum(const CelloView<enzo_float,3> &d,
   return;
 }
 
+void sum_energy_momentum(
+  const CelloView<const enzo_float,3> &pu,  // pointer & values are const
+  const CelloView<const enzo_float,3> &pv,
+  const CelloView<const enzo_float,3> &pw,
+  const CelloView<const enzo_float,3> &d,
+  const int ic, const int jc, const int kc,
+  double &mass_sum,
+  double &kin_energy_sum,
+  double &mom_sum
+) {
+  // Sum mass, kinetic energy and momentum magnitude over 3x3x3 cube
+  mass_sum = 0.0;
+  kin_energy_sum = 0.0;
+  mom_sum = 0.0;
+
+  for (int k = -1; k <= 1; ++k) {
+    for (int j = -1; j <= 1; ++j) {
+      for (int i = -1; i <= 1; ++i) {
+
+        const int ii = ic + i;
+        const int jj = jc + j;
+        const int kk = kc + k;
+
+        double mass_term = static_cast<double>(d(ii,jj,kk)); // mass/vol
+
+        double pu2 = static_cast<double>(pu(ii,jj,kk));
+        double pv2 = static_cast<double>(pv(ii,jj,kk));
+        double pw2 = static_cast<double>(pw(ii,jj,kk));
+        double mom_term_sq = pu2*pu2 + pv2*pv2 + pw2*pw2; // mass^2*velocity^2/volume^2
+
+        double kin_energy = 0.0;
+        if (mass_term > 0.0) {
+          kin_energy = mom_term_sq / (2.0 * mass_term);
+        } else {
+          // avoid divide by zero; treat cell with zero mass as contributing nothing
+          kin_energy = 0.0;
+        }
+
+        mass_sum += mass_term;
+        kin_energy_sum += kin_energy;
+        mom_sum += std::sqrt(mom_term_sq);
+      }
+    }
+  }
+  return;
+}
+
+void add_feedback_SNe(
+  const CelloView<enzo_float,3> &pu,  // pointer can't change; values can
+  const CelloView<enzo_float,3> &pv,
+  const CelloView<enzo_float,3> &pw,
+  const CelloView<enzo_float,3> &d,
+  const CelloView<enzo_float,3> &ge,
+  const CelloView<enzo_float,3> &te,
+  const CelloView<enzo_float,3> &metals,
+  const CelloView<enzo_float,3> &metalSNII,
+  const CelloView<enzo_float,3> &metalSNIa,
+  const int ic, const int jc, const int kc,
+  const double mass_per_cell,
+  const double mom_per_cell[3][3][3],
+  const double mzeject, const double mzeject_ia, const double mzeject_ii,
+  const double cell_volume,
+  const bool track_metal_sources,
+  const bool cap_velocity_kick
+) {
+  // pu,pv,pw are momentum-like quantities (mass*vel/volume)
+  // mass_per_cell in code density units (mass/volume)
+  // mom_per_cell indexed [0..2] for i=-1..1
+  // mzeject variables are metal density in code units (mass/volume)
+
+  EnzoUnits * enzo_units = enzo::units();
+
+  double dunit = enzo_units->density();
+  double vunit = enzo_units->velocity();
+  double lunit = enzo_units->length();
+
+  const double to_km_per_s = vunit / 1e5;  // 1000 km/s in code units
+
+  for (int i = -1; i <= 1; ++i) {
+    for (int j = -1; j <= 1; ++j) {
+      for (int k = -1; k <= 1; ++k) {
+
+        int ii = ic + i;
+        int jj = jc + j;
+        int kk = kc + k;
+
+        int dist = i*i + j*j + k*k;
+        double mult = 0.0;
+        if (dist == 0) {
+          mult = 0.0;
+        } else if (dist == 1) {
+          mult = 1.0;
+        } else if (dist == 2) {
+          mult = 1.0 / std::sqrt(2.0);
+        } else if (dist == 3) {
+          mult = 1.0 / std::sqrt(3.0);
+        }
+
+        int ai = i + 1;  // 0..2
+        int aj = j + 1;
+        int ak = k + 1;
+
+        double delta_pu = i * mult * mom_per_cell[ai][aj][ak];
+        double delta_pv = j * mult * mom_per_cell[ai][aj][ak];
+        double delta_pw = k * mult * mom_per_cell[ai][aj][ak];
+        double delta_p = std::sqrt(
+          delta_pu*delta_pu + delta_pv*delta_pv + delta_pw*delta_pw
+        );
+
+        double dens = static_cast<double>(d(ii,jj,kk));
+        double new_dens = (dens + mass_per_cell);
+        double vel_kick = 0.0;
+        if (new_dens > 0.0) {
+          vel_kick = delta_p / new_dens * to_km_per_s;
+        }
+
+        if (cap_velocity_kick && vel_kick > 1000.0) {
+          delta_p = 1000.0 / to_km_per_s * new_dens;
+          delta_pu = i * mult * delta_p;
+          delta_pv = j * mult * delta_p;
+          delta_pw = k * mult * delta_p;
+        }
+
+        // add momentum (pu,pv,pw are momentum-like quantities)
+        double pu_start = static_cast<double>(pu(ii,jj,kk));
+        double pv_start = static_cast<double>(pv(ii,jj,kk));
+        double pw_start = static_cast<double>(pw(ii,jj,kk));
+
+        pu(ii,jj,kk) = static_cast<enzo_float>(pu_start + delta_pu);
+        pv(ii,jj,kk) = static_cast<enzo_float>(pv_start + delta_pv);
+        pw(ii,jj,kk) = static_cast<enzo_float>(pw_start + delta_pw);
+
+        // adjust thermal (specific) energies to account for added mass
+        double dratio = 1.0;
+        dratio = dens / new_dens;
+
+        te(ii,jj,kk) = static_cast<enzo_float>( static_cast<double>(te(ii,jj,kk)) * dratio );
+        ge(ii,jj,kk) = static_cast<enzo_float>( static_cast<double>(ge(ii,jj,kk)) * dratio );
+
+        if (!metals.is_null()) {
+          double metal_old = static_cast<double>(metals(ii,jj,kk)); // metal density
+          double metal_new = metal_old + mzeject;
+          double mf_new = std::max(metal_new / new_dens, 0.95); // Cap metal fraction at 0.95
+          metals(ii,jj,kk) = static_cast<enzo_float>(mf_new) * new_dens;
+        }
+
+        if (track_metal_sources && !metalSNII.is_null() && !metalSNIa.is_null()) {
+          double mzii_old = static_cast<double>(metalSNII(ii,jj,kk));
+          double mzia_old = static_cast<double>(metalSNIa(ii,jj,kk));
+
+          double mzii_new = mzii_old + mzeject_ii;
+          double mzia_new = mzia_old + mzeject_ia;
+
+          double mfii_new = std::max(mzii_new / new_dens, 0.95);
+          double mfia_new = std::max(mzia_new / new_dens, 0.95);
+
+          metalSNII(ii,jj,kk) = static_cast<enzo_float>(mfii_new) * new_dens;
+          metalSNIa(ii,jj,kk) = static_cast<enzo_float>(mfia_new) * new_dens;
+        }
+
+        // Finally add mass to density field
+        d(ii,jj,kk) = static_cast<enzo_float>(dens + mass_per_cell);
+
+      }
+    }
+  }
+  return;
+}
 
 // =============================================================================
 
@@ -228,6 +400,8 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
   ejecta_metal_fraction_ = p.value_float("ejecta_metal_fraction",0.02);
   min_nsn_per_timestep_  = p.value_integer("nsn_per_timestep",1000);
   momentum_mult_         = p.value_float("momentum_multiplier",1.0);
+  cap_velocity_kick_     = p.value_logical("cap_velocity_kick",true);
+  track_metal_sources_   = p.value_logical("track_metal_sources",true);
 
   // required fields
   cello::define_field("density");
@@ -238,8 +412,16 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
   cello::define_field("velocity_y");
   cello::define_field("velocity_z");
   cello::define_field("metal_density");
-
+  
   cello::define_field_in_group("metal_density","color");
+  
+  if (track_metal_sources_) {
+    cello::define_field("metal_snII_density");
+    cello::define_field("metal_snIa_density");
+
+    cello::define_field_in_group("metal_snII_density","color");
+    cello::define_field_in_group("metal_snIa_density","color");
+  }
 
   // Initialize refresh object
   cello::simulation()->refresh_set_name(ir_post_,name());
@@ -247,15 +429,13 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
   refresh->add_all_fields();
 
   // Initialize temporary fields
-  i_nsn = cello::field_descr()->insert_temporary();
-  i_dep_mass = cello::field_descr()->insert_temporary();
-  i_dep_metl = cello::field_descr()->insert_temporary();
-  i_dep_snii = cello::field_descr()->insert_temporary();
-  i_dep_snia = cello::field_descr()->insert_temporary();
-  i_dep_vxp = cello::field_descr()->insert_temporary();
-  i_dep_vyp = cello::field_descr()->insert_temporary();
-  i_dep_vzp = cello::field_descr()->insert_temporary();
-
+  i_yld_nsn = cello::field_descr()->insert_temporary();
+  i_yld_mass = cello::field_descr()->insert_temporary();
+  i_yld_metl = cello::field_descr()->insert_temporary();
+  i_yld_vxp = cello::field_descr()->insert_temporary();
+  i_yld_vyp = cello::field_descr()->insert_temporary();
+  i_yld_vzp = cello::field_descr()->insert_temporary();
+  
   i_d_dep  = cello::field_descr()->insert_temporary();
   i_te_dep = cello::field_descr()->insert_temporary();
   i_ge_dep = cello::field_descr()->insert_temporary();
@@ -263,7 +443,7 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
   i_vx_dep = cello::field_descr()->insert_temporary();
   i_vy_dep = cello::field_descr()->insert_temporary();
   i_vz_dep = cello::field_descr()->insert_temporary();
-
+  
   i_d_dep_a  = cello::field_descr()->insert_temporary();
   i_te_dep_a = cello::field_descr()->insert_temporary();
   i_ge_dep_a = cello::field_descr()->insert_temporary();
@@ -271,6 +451,16 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
   i_vx_dep_a = cello::field_descr()->insert_temporary();
   i_vy_dep_a = cello::field_descr()->insert_temporary();
   i_vz_dep_a = cello::field_descr()->insert_temporary();
+  
+  if (track_metal_sources_) {
+    i_yld_snii = cello::field_descr()->insert_temporary();
+    i_yld_snia = cello::field_descr()->insert_temporary();
+
+    i_mdii_dep = cello::field_descr()->insert_temporary();
+    i_mdia_dep = cello::field_descr()->insert_temporary();
+    i_mdii_dep_a = cello::field_descr()->insert_temporary();
+    i_mdia_dep_a = cello::field_descr()->insert_temporary();
+  }
 
   // Deposition across grid boundaries is handled using refresh with set_accumulate=true.
   // The set_accumulate flag tells Cello to include ghost zones in the refresh operation,
@@ -295,7 +485,13 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
   refresh_fb->add_field_src_dst(i_vx_dep, i_vx_dep_a);
   refresh_fb->add_field_src_dst(i_vy_dep, i_vy_dep_a);
   refresh_fb->add_field_src_dst(i_vz_dep, i_vz_dep_a);
+  
+  if (track_metal_sources_) {
+    refresh_fb->add_field_src_dst(i_mdii_dep, i_mdii_dep_a);
+    refresh_fb->add_field_src_dst(i_mdia_dep, i_mdia_dep_a);
+  } 
 
+  // TODO add SNII and SNIa fields to p_method_feedback_mech_end callback
   refresh_fb->set_callback(CkIndex_EnzoBlock::p_method_feedback_mech_end());
 
   return;
@@ -316,22 +512,26 @@ void EnzoMethodFeedbackMechanical::pup (PUP::er &p)
   p | ejecta_metal_fraction_;
   p | min_nsn_per_timestep_;
   p | momentum_mult_;
+  p | cap_velocity_kick_;
+  p | track_metal_sources_;
 
   // temporary yield fields
-  p | i_nsn;
-  p | i_dep_mass;
-  p | i_dep_metl;
-  p | i_dep_snii;
-  p | i_dep_snia;
-  p | i_dep_vxp;
-  p | i_dep_vyp;
-  p | i_dep_vzp;
+  p | i_yld_nsn;
+  p | i_yld_mass;
+  p | i_yld_metl;
+  p | i_yld_snii;
+  p | i_yld_snia;
+  p | i_yld_vxp;
+  p | i_yld_vyp;
+  p | i_yld_vzp;
 
   // accumulation fields
   p | i_d_dep;
   p | i_te_dep;
   p | i_ge_dep;
   p | i_md_dep;
+  p | i_mdii_dep;
+  p | i_mdia_dep;
   p | i_vx_dep;
   p | i_vy_dep;
   p | i_vz_dep;
@@ -340,6 +540,8 @@ void EnzoMethodFeedbackMechanical::pup (PUP::er &p)
   p | i_te_dep_a;
   p | i_ge_dep_a;
   p | i_md_dep_a;
+  p | i_mdii_dep_a;
+  p | i_mdia_dep_a;
   p | i_vx_dep_a;
   p | i_vy_dep_a;
   p | i_vz_dep_a;
@@ -416,20 +618,24 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
     CelloView<enzo_float,3> ge = field.view<enzo_float>("internal_energy");
     CelloView<enzo_float,3> md = field.view<enzo_float>("metal_density");
 
+    CelloView<enzo_float,3> mdii, mdia;  // uninitialized acts as nullptr
+    if (track_metal_sources_) {
+      mdii = field.view<enzo_float>("metal_snII_density");
+      mdia = field.view<enzo_float>("metal_snIa_density");
+    }
+
     // allocate temporary fields
     allocate_temporary_yields_(enzo_block);
     allocate_temporary_fluids_(enzo_block);
 
     // initialize temporary fields as zero
-    CelloView<enzo_float,3> nsn_dep  = field.view<enzo_float>(i_nsn);
-    CelloView<enzo_float,3> m_dep  = field.view<enzo_float>(i_dep_mass);
-    CelloView<enzo_float,3> mz_dep = field.view<enzo_float>(i_dep_metl);
-    CelloView<enzo_float,3> mzii_dep = field.view<enzo_float>(i_dep_snii);
-    CelloView<enzo_float,3> mzia_dep = field.view<enzo_float>(i_dep_snia);
-    CelloView<enzo_float,3> vxp_dep = field.view<enzo_float>(i_dep_vxp);
-    CelloView<enzo_float,3> vyp_dep = field.view<enzo_float>(i_dep_vyp);
-    CelloView<enzo_float,3> vzp_dep = field.view<enzo_float>(i_dep_vzp);
-
+    CelloView<enzo_float,3> nsn_yld  = field.view<enzo_float>(i_yld_nsn);
+    CelloView<enzo_float,3> m_yld  = field.view<enzo_float>(i_yld_mass);
+    CelloView<enzo_float,3> mz_yld = field.view<enzo_float>(i_yld_metl);
+    CelloView<enzo_float,3> vxp_yld = field.view<enzo_float>(i_yld_vxp);
+    CelloView<enzo_float,3> vyp_yld = field.view<enzo_float>(i_yld_vyp);
+    CelloView<enzo_float,3> vzp_yld = field.view<enzo_float>(i_yld_vzp);
+    
     CelloView<enzo_float,3> d_dep  = field.view<enzo_float>(i_d_dep);
     CelloView<enzo_float,3> te_dep = field.view<enzo_float>(i_te_dep);
     CelloView<enzo_float,3> ge_dep = field.view<enzo_float>(i_ge_dep);
@@ -437,7 +643,7 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
     CelloView<enzo_float,3> vx_dep = field.view<enzo_float>(i_vx_dep);
     CelloView<enzo_float,3> vy_dep = field.view<enzo_float>(i_vy_dep);
     CelloView<enzo_float,3> vz_dep = field.view<enzo_float>(i_vz_dep);
-
+    
     CelloView<enzo_float,3> d_dep_a  = field.view<enzo_float>(i_d_dep_a);
     CelloView<enzo_float,3> te_dep_a = field.view<enzo_float>(i_te_dep_a);
     CelloView<enzo_float,3> ge_dep_a = field.view<enzo_float>(i_ge_dep_a);
@@ -445,19 +651,31 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
     CelloView<enzo_float,3> vx_dep_a = field.view<enzo_float>(i_vx_dep_a);
     CelloView<enzo_float,3> vy_dep_a = field.view<enzo_float>(i_vy_dep_a);
     CelloView<enzo_float,3> vz_dep_a = field.view<enzo_float>(i_vz_dep_a);
+    
+    CelloView<enzo_float,3> mzii_yld, mzia_yld;  // uninitialized acts as nullptr
+    CelloView<enzo_float,3> mdii_dep, mdia_dep;
+    CelloView<enzo_float,3> mdii_dep_a, mdia_dep_a;
+    if (track_metal_sources_) {
+      mzii_yld = field.view<enzo_float>(i_yld_snii);
+      mzia_yld = field.view<enzo_float>(i_yld_snia);
+
+      mdii_dep = field.view<enzo_float>(i_mdii_dep);
+      mdia_dep = field.view<enzo_float>(i_mdia_dep);
+
+      mdii_dep_a = field.view<enzo_float>(i_mdii_dep_a);
+      mdia_dep_a = field.view<enzo_float>(i_mdia_dep_a);
+    }
 
     for (int iz=gz; iz<mz-gz; iz++) {
       for (int iy=gy; iy<my-gy; iy++) {
         for (int ix=gx; ix<my-gx; ix++) {
-          nsn_dep (ix, iy, iz) = 0.0;
-          m_dep (ix, iy, iz) = 0.0;
-          mz_dep(ix, iy, iz) = 0.0;
-          mzii_dep(ix, iy, iz) = 0.0;
-          mzia_dep(ix, iy, iz) = 0.0;
-          vxp_dep(ix, iy, iz) = 0.0;
-          vyp_dep(ix, iy, iz) = 0.0;
-          vzp_dep(ix, iy, iz) = 0.0;
-
+          nsn_yld (ix, iy, iz) = 0.0;
+          m_yld (ix, iy, iz) = 0.0;
+          mz_yld(ix, iy, iz) = 0.0;
+          vxp_yld(ix, iy, iz) = 0.0;
+          vyp_yld(ix, iy, iz) = 0.0;
+          vzp_yld(ix, iy, iz) = 0.0;
+          
           d_dep (ix, iy, iz) = 0.0;
           te_dep(ix, iy, iz) = 0.0;
           ge_dep(ix, iy, iz) = 0.0;
@@ -465,7 +683,7 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           vx_dep(ix, iy, iz) = 0.0;
           vy_dep(ix, iy, iz) = 0.0;
           vz_dep(ix, iy, iz) = 0.0;
-
+          
           d_dep_a (ix, iy, iz) = 0.0;
           te_dep_a(ix, iy, iz) = 0.0;
           ge_dep_a(ix, iy, iz) = 0.0;
@@ -473,6 +691,17 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           vx_dep_a(ix, iy, iz) = 0.0;
           vy_dep_a(ix, iy, iz) = 0.0;
           vz_dep_a(ix, iy, iz) = 0.0;
+
+          if (track_metal_sources_) {
+            mzii_yld(ix, iy, iz) = 0.0;
+            mzia_yld(ix, iy, iz) = 0.0;
+
+            mdii_dep(ix, iy, iz) = 0.0;
+            mdia_dep(ix, iy, iz) = 0.0;
+
+            mdii_dep_a(ix, iy, iz) = 0.0;
+            mdia_dep_a(ix, iy, iz) = 0.0;
+          }
         }
       }
     }
@@ -501,9 +730,6 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
     const int nb = particle.num_batches(it);
 
     // Iterate over particles to deposit their yield to a grid
-    double mom_per_cell[3][3][3];
-    double eng_per_cell[3][3][3];
-    double ke_before[3][3][3];
     for (int ib=0; ib<nb; ib++){
       enzo_float *px=0, *py=0, *pz=0, *pvx=0, *pvy=0, *pvz=0;
       enzo_float *plifetime=0, *pcreation=0, *pmass=0, *pmetal=0, *pimass=0;
@@ -542,6 +768,7 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           // Get yields from tables
           double nsn, nsn_ii, nsn_ia, mej, mej_ii, mej_ia,
             mzej, mzej_ii, mzej_ia;
+          // TODO ensure metal yields are returned as densities
 
           // Stochasitcally sample a Poisson distribution using the expected
           // number of SNe as the mean.
@@ -562,7 +789,7 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
               );
               mzej_ii = std::min(
                 (mzej_ii/nsn_ii * nsn_ii_sto) * pmass[ip_m]/pimass[ip_im],
-                ejecta_metal_fraction_ * pmass[ip_m]
+                ejecta_metal_fraction_ * pmass[ip_m]  // TODO ensure particle mass is a density
               );
             } else {
               mej_ii = 0.0;
@@ -583,10 +810,12 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
               mzej_ia = 0.0;
             }
 
+            // reset SNe numbers to those that were drawn
             nsn_ii = nsn_ii_sto;
             nsn_ia = nsn_ia_sto;
           } // end stochastic
 
+          // sum yields
           nsn = nsn_ii + nsn_ia;
           if (nsn < min_nsn_per_timestep_)
             nsn = 0.0;
@@ -616,26 +845,34 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
 
           // Store yields in temporary grids
           // so we can sum over all particles a given cell
-          nsn_dep(ix, iy, iz) += (enzo_float) nsn;
-          m_dep(ix, iy, iz) += (enzo_float) mej;
-          mz_dep(ix, iy, iz) += (enzo_float) mzej;
-          mzii_dep(ix, iy, iz) += (enzo_float) mzej_ii;
-          mzia_dep(ix, iy, iz) += (enzo_float) mzej_ia;
+          nsn_yld(ix, iy, iz) += (enzo_float) nsn;
+          m_yld(ix, iy, iz) += (enzo_float) mej;
+          mz_yld(ix, iy, iz) += (enzo_float) mzej;
+          if (track_metal_sources_) {
+            mzii_yld(ix, iy, iz) += (enzo_float) mzej_ii;
+            mzia_yld(ix, iy, iz) += (enzo_float) mzej_ia;
+          }
 
           // Weight avg velocity by number of SNe going off
-          vxp_dep(ix, iy, iz) += (enzo_float) (pvx[ip_v] * nsn);
-          vyp_dep(ix, iy, iz) += (enzo_float) (pvy[ip_v] * nsn);
-          vzp_dep(ix, iy, iz) += (enzo_float) (pvz[ip_v] * nsn);
+          vxp_yld(ix, iy, iz) += (enzo_float) (pvx[ip_v] * nsn);
+          vyp_yld(ix, iy, iz) += (enzo_float) (pvy[ip_v] * nsn);
+          vzp_yld(ix, iy, iz) += (enzo_float) (pvz[ip_v] * nsn);
           
         } // if mass and lifetime > 0
       } // end particle loop
     } // end batch loop
 
     // Now, iterate over yield grids and apply to actual fields
+    // using 3x3x3 dummy grids
+    double mom_per_cell[3][3][3], eng_per_cell[3][3][3], ke_old_grid[3][3][3];
+    CelloView<enzo_float, 3> px1(3,3,3), py1(3,3,3), pz1(3,3,3);
+    CelloView<enzo_float, 3> d1(3,3,3), ge1(3,3,3), te1(3,3,3);
+    CelloView<enzo_float, 3> null; // uninitialized CelloView analogous to nullptr
+
     for (int iz=gz; iz<mz-gz; iz++) {
       for (int iy=gy; iy<my-gy; iy++) {
         for (int ix=gx; ix<my-gx; ix++) {
-          if (nsn_dep(ix, iy, iz) == 0.0) continue; // no SNe from this cell
+          if (nsn_yld(ix, iy, iz) == 0.0) continue; // no SNe from this cell
 
           // compute average density & metallicity around this cell
           double avg_Z = 0.0, avg_n = 0.0;
@@ -655,22 +892,27 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           avg_Z = std::max(avg_Z/fb_cells, 0.01);
           avg_n /= fb_cells;
 
-          // Compute mass & momentum this cell is responsible for injecting
-          double m_per_cell, mz_per_cell, mzii_per_cell, mzia_per_cell;
-          m_per_cell = m_dep(ix, iy, iz) / fb_cells;
-          mz_per_cell = mz_dep(ix, iy, iz) / fb_cells;
-          mzii_per_cell = mzii_dep(ix, iy, iz) / fb_cells;
-          mzia_per_cell = mzia_dep(ix, iy, iz) / fb_cells;
+          // Compute mass, momentum, & energy this cell is responsible for injecting
+          double m_per_cell, mz_per_cell;
+          double mzii_per_cell=0.0, mzia_per_cell=0.0;
+          m_per_cell = m_yld(ix, iy, iz) / fb_cells;
+          mz_per_cell = mz_yld(ix, iy, iz) / fb_cells;
+          if (track_metal_sources_) {
+            mzii_per_cell = mzii_yld(ix, iy, iz) / fb_cells;
+            mzia_per_cell = mzia_yld(ix, iy, iz) / fb_cells;
+          }
 
-          get_mom_per_cell(d, m_per_cell, fb_cells,
-                           mom_per_cell, eng_per_cell,
-                           nsn_dep(ix, iy, iz), d(ix, iy, iz),
-                           cell_volume, cell_volume_octant,
-                           avg_n, avg_Z,
-                           ix, iy, iz,
-                           momentum_mult_);
+          compute_snii_energy_momentum(
+            d, m_per_cell, fb_cells,
+            mom_per_cell, eng_per_cell,
+            nsn_yld(ix, iy, iz), d(ix, iy, iz),
+            cell_volume, cell_volume_octant,
+            avg_n, avg_Z,
+            ix, iy, iz,
+            momentum_mult_
+          );
 
-          // check that injection is nonzero
+          // check that momentum & energy injection are nonzero
           double mom_inj = 0.0, eng_inj = 0.0;
           for (int i=0; i<=2; i++){
             for (int j=0; j<=2; j++){
@@ -683,29 +925,83 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           if ((mom_inj <= 0.0) || (eng_inj <= 0.0))
             continue;
 
-          // find initial kinetic energy, before injection
+          // find initial kinetic energy in grid frame before injection
           // units of mass*velocity^2/volume
-          for (int i=-1; i<=1; i++){
-            for (int j=-1; j<=1; j++){
-              for (int k=-1; k<=1; k++){
-                ke_before[i+1][j+1][k+1] = d(i,j,k) * 0.5 * (
+          for (int i=-1; i<=1; i++)
+            for (int j=-1; j<=1; j++)
+              for (int k=-1; k<=1; k++)
+                ke_old_grid[i+1][j+1][k+1] = d(i,j,k) * 0.5 * (
                   vx(i,j,k)*vx(i,j,k) * vy(i,j,k)*vy(i,j,k) * vz(i,j,k)*vz(i,j,k)
                 );
-              }
-            }
-          }
 
           // convert current velocities to momenta and transform into frame
           // comoving with explosion-weighted average velocity in this cell
-          double vxp_avg = vxp_dep(ix, iy, iz)/nsn_dep(ix, iy, iz);
-          double vyp_avg = vyp_dep(ix, iy, iz)/nsn_dep(ix, iy, iz);
-          double vzp_avg = vzp_dep(ix, iy, iz)/nsn_dep(ix, iy, iz);
+          double vxp_avg = vxp_yld(ix, iy, iz)/nsn_yld(ix, iy, iz);
+          double vyp_avg = vyp_yld(ix, iy, iz)/nsn_yld(ix, iy, iz);
+          double vzp_avg = vzp_yld(ix, iy, iz)/nsn_yld(ix, iy, iz);
           transform_momentum(d, vx, vy, vz,
                              vxp_avg, vyp_avg, vzp_avg,
                              ix, iy, iz, 1);
 
           // sum mass, energy, and momentum before
-          // TODO make ke part of this?
+          double mass_old, ke_old_explosion, mom_old;
+          sum_energy_momentum(vx, vy, vz, d, 
+                              ix, iy, iz,
+                              mass_old, ke_old_explosion, mom_old);
+
+          // Zero dummy grids
+          for (int i = 0; i <= 3; ++i) {
+            for (int j = 0; j <= 3; ++j) {
+              for (int k = 0; k <= 3; ++k) {
+
+                px1(i,j,k) = 0.0;
+                py1(i,j,k) = 0.0;
+                pz1(i,j,k) = 0.0;
+
+                // copy host-grid density into dummy density array
+                d1(i,j,k) = d(ix + i-1, iy + j-1, iz + k-1);
+
+                ge1(i,j,k) = 0.0;
+                te1(i,j,k) = 0.0;
+              }
+            }
+          }
+
+          // Add FB to dummy grids
+          add_feedback_SNe(
+            px1, py1, pz1,
+            d1, ge1, te1,
+            null, null, null, // no metals in dummy
+            1, 1, 1,          // center of dummy grid (runs 0..2)
+            m_per_cell,
+            mom_per_cell,
+            0.0, 0.0, 0.0,    // no metals in dummy
+            cell_volume,
+            track_metal_sources_,
+            cap_velocity_kick_
+          );
+
+          // sum mass, energy, and momentum in particle frame (dummy grids)
+          double mass_dummy, ke_dummy_explosion, mom_dummy;
+          sum_energy_momentum(px1, py1, pz1, d1,
+                              1, 1, 1,  // center of dummy grid
+                              mass_dummy, ke_dummy_explosion, mom_dummy);
+
+          // Add FB to actual grids
+          add_feedback_SNe(
+            vx_dep, vy_dep, vz_dep,
+            d_dep, ge_dep, te_dep,
+            md_dep, mdii_dep, mdia_dep,
+            ix, iy, iz,
+            m_per_cell,
+            mom_per_cell,
+            mz_per_cell,
+            mzii_per_cell,
+            mzia_per_cell,
+            cell_volume,
+            track_metal_sources_,
+            cap_velocity_kick_
+          );
         }
       }
     }
