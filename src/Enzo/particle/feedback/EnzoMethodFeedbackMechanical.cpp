@@ -57,16 +57,15 @@ void draw_stochastic(double &nsn_ii, double &nsn_ia) {
 }
 
 void compute_snii_energy_momentum(
-  const CelloView<const enzo_float,3> &d,  // pointer & values are const
-  double mass_per_cell,
-  int distcells,
-  double mom_per_cell[3][3][3],
-  double energy_per_cell[3][3][3],
   double nsn,
-  double d_fbck_cell,
-  double vol_cell, double vol_cell_oct,
+  int distcells,
+  const CelloView<const enzo_float,3> &d,  // pointer & values are const
   double n_avg, double Z_floor,
   int ic, int jc, int kc,
+  double vol_cell, double vol_cell_oct,
+  double mass_per_cell,
+  double mom_per_cell[3][3][3],
+  double energy_per_cell[3][3][3],
   double mom_mult
 ) {
   EnzoUnits * enzo_units = enzo::units();
@@ -87,6 +86,7 @@ void compute_snii_energy_momentum(
   double chi_th = 69.58 * std::pow(nsn, -2.0/17.0) *
                           std::pow(n_avg, -4.0/17.0) *
                           std::pow(Z_floor, -0.28);
+  double d_fbck_cell = d(ic,jc,kc); // code density units
 
   // Loop neighbors
   for (int i = -1; i <= 1; ++i) {
@@ -174,8 +174,9 @@ void transform_momentum(
   const CelloView<enzo_float,3> &u,       // just pointer is const
   const CelloView<enzo_float,3> &v,
   const CelloView<enzo_float,3> &w,
+  const int ic, const int jc, const int kc,
   double up, double vp, double wp,
-  const int ic, const int jc, const int kc, const int idir
+  const int idir
 ) {
   // Converts velocity in the grid frame to momentum in the explosion frame
   // and back again:
@@ -210,10 +211,10 @@ void transform_momentum(
 }
 
 void sum_energy_momentum(
+  const CelloView<const enzo_float,3> &d,
   const CelloView<const enzo_float,3> &pu,  // pointer & values are const
   const CelloView<const enzo_float,3> &pv,
   const CelloView<const enzo_float,3> &pw,
-  const CelloView<const enzo_float,3> &d,
   const int ic, const int jc, const int kc,
   double &mass_sum,
   double &kin_energy_sum,
@@ -863,8 +864,11 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
     } // end batch loop
 
     // Now, iterate over yield grids and apply to actual fields
-    // using 3x3x3 dummy grids
+    // using 3x3x3 dummy grids to capture momentum cancellation
+    double m_per_cell, mz_per_cell;
+    double mzii_per_cell=0.0, mzia_per_cell=0.0;
     double mom_per_cell[3][3][3], eng_per_cell[3][3][3], ke_old_grid[3][3][3];
+
     CelloView<enzo_float, 3> px1(3,3,3), py1(3,3,3), pz1(3,3,3);
     CelloView<enzo_float, 3> d1(3,3,3), ge1(3,3,3), te1(3,3,3);
     CelloView<enzo_float, 3> null; // uninitialized CelloView analogous to nullptr
@@ -893,22 +897,19 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           avg_n /= fb_cells;
 
           // Compute mass, momentum, & energy this cell is responsible for injecting
-          double m_per_cell, mz_per_cell;
-          double mzii_per_cell=0.0, mzia_per_cell=0.0;
           m_per_cell = m_yld(ix, iy, iz) / fb_cells;
           mz_per_cell = mz_yld(ix, iy, iz) / fb_cells;
-          if (track_metal_sources_) {
+          if (track_metal_sources_) {  // these are initialized to zero
             mzii_per_cell = mzii_yld(ix, iy, iz) / fb_cells;
             mzia_per_cell = mzia_yld(ix, iy, iz) / fb_cells;
           }
 
           compute_snii_energy_momentum(
-            d, m_per_cell, fb_cells,
-            mom_per_cell, eng_per_cell,
-            nsn_yld(ix, iy, iz), d(ix, iy, iz),
-            cell_volume, cell_volume_octant,
-            avg_n, avg_Z,
+            nsn_yld(ix, iy, iz), fb_cells,
+            d, avg_n, avg_Z,
             ix, iy, iz,
+            cell_volume, cell_volume_octant,
+            m_per_cell, mom_per_cell, eng_per_cell,
             momentum_mult_
           );
 
@@ -930,29 +931,30 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           for (int i=-1; i<=1; i++)
             for (int j=-1; j<=1; j++)
               for (int k=-1; k<=1; k++)
-                ke_old_grid[i+1][j+1][k+1] = d(i,j,k) * 0.5 * (
+                ke_old_grid[i+1][j+1][k+1] = d(ix+i, iy+j, iz+k) * 0.5 * (
                   vx(i,j,k)*vx(i,j,k) * vy(i,j,k)*vy(i,j,k) * vz(i,j,k)*vz(i,j,k)
                 );
 
-          // convert current velocities to momenta and transform into frame
+          // convert current velocities to momenta and transform into the frame
           // comoving with explosion-weighted average velocity in this cell
           double vxp_avg = vxp_yld(ix, iy, iz)/nsn_yld(ix, iy, iz);
           double vyp_avg = vyp_yld(ix, iy, iz)/nsn_yld(ix, iy, iz);
           double vzp_avg = vzp_yld(ix, iy, iz)/nsn_yld(ix, iy, iz);
           transform_momentum(d, vx, vy, vz,
+                             ix, iy, iz,
                              vxp_avg, vyp_avg, vzp_avg,
-                             ix, iy, iz, 1);
+                             1);
 
           // sum mass, energy, and momentum before
           double mass_old, ke_old_explosion, mom_old;
-          sum_energy_momentum(vx, vy, vz, d, 
+          sum_energy_momentum(d, vx, vy, vz,
                               ix, iy, iz,
                               mass_old, ke_old_explosion, mom_old);
 
           // Zero dummy grids
-          for (int i = 0; i <= 3; ++i) {
-            for (int j = 0; j <= 3; ++j) {
-              for (int k = 0; k <= 3; ++k) {
+          for (int i=0; i<=2; i++){
+            for (int j=0; j<=2; j++){
+              for (int k=0; k<=2; k++){
 
                 px1(i,j,k) = 0.0;
                 py1(i,j,k) = 0.0;
@@ -983,7 +985,7 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
 
           // sum mass, energy, and momentum in particle frame (dummy grids)
           double mass_dummy, ke_dummy_explosion, mom_dummy;
-          sum_energy_momentum(px1, py1, pz1, d1,
+          sum_energy_momentum(d1, px1, py1, pz1,
                               1, 1, 1,  // center of dummy grid
                               mass_dummy, ke_dummy_explosion, mom_dummy);
 
@@ -1002,6 +1004,34 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
             track_metal_sources_,
             cap_velocity_kick_
           );
+
+          // sum mass, energy, and momentum after injection
+          double mass_new, ke_new_explosion, mom_new;
+          sum_energy_momentum(d, vx, vy, vz,
+                              ix, iy, iz,
+                              mass_new, ke_new_explosion, mom_new);
+
+          // The KE added to real grid can be less than added to the dummy
+          // because of momentum cancellation
+          // If this is true, add the missing energy as thermal energy
+          double ke_deficit = ke_dummy_explosion - (ke_new_explosion - ke_old_explosion);
+          ke_deficit = std::max(ke_deficit, 0.0); // must be positive
+
+          // Convert momenta back to velocities & transform to simulation frame
+          transform_momentum(d, vx, vy, vz,
+                             ix, iy, iz,
+                             vxp_avg, vyp_avg, vzp_avg,
+                             -1);
+
+          // Track change in KE in the total energy field
+          // and inject both energy lost due to momentum cancellation (ke_deficit)
+          // and energy from resolved Sedov-Taylor phase (eng_per_cell) as thermal energy
+          for (int i=-1; i<=1; i++){
+            for (int j=-1; j<=1; j++){
+              for (int k=-1; k<=1; k++){
+              }
+            }
+          }
         }
       }
     }
