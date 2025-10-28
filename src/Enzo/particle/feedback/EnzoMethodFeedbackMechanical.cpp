@@ -881,9 +881,9 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           // compute average density & metallicity around this cell
           double avg_Z = 0.0, avg_n = 0.0;
           double cell_mf, cell_Z, cell_mu, cell_n;
-          for (int i=-1; i<=1; i++){
+          for (int k=-1; k<=1; k++){
             for (int j=-1; j<=1; j++){
-              for (int k=-1; k<=1; k++){
+              for (int i=-1; i<=1; i++){
                 cell_mf = md(ix+i, iy+j, iz+k) / d(ix+i, iy+j, iz+k);
                 // TODO make a better mu calculation
                 cell_mu = 0.8125*(1.0-cell_mf) + cell_mf/16.0;
@@ -914,6 +914,8 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           );
 
           // check that momentum & energy injection are nonzero
+          // this is the only time I'll use ijk insead of kji ordering
+          // because I'm only working with an array of doubles
           double mom_inj = 0.0, eng_inj = 0.0;
           for (int i=0; i<=2; i++){
             for (int j=0; j<=2; j++){
@@ -928,11 +930,13 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
 
           // find initial kinetic energy in grid frame before injection
           // units of mass*velocity^2/volume
-          for (int i=-1; i<=1; i++)
+          for (int k=-1; k<=1; k++)
             for (int j=-1; j<=1; j++)
-              for (int k=-1; k<=1; k++)
+              for (int i=-1; i<=1; i++)
                 ke_old_grid[i+1][j+1][k+1] = d(ix+i, iy+j, iz+k) * 0.5 * (
-                  vx(i,j,k)*vx(i,j,k) * vy(i,j,k)*vy(i,j,k) * vz(i,j,k)*vz(i,j,k)
+                  vx(ix+i, iy+j, iz+k)*vx(ix+i, iy+j, iz+k) +
+                  vy(ix+i, iy+j, iz+k)*vy(ix+i, iy+j, iz+k) +
+                  vz(ix+i, iy+j, iz+k)*vz(ix+i, iy+j, iz+k)
                 );
 
           // convert current velocities to momenta and transform into the frame
@@ -945,16 +949,19 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
                              vxp_avg, vyp_avg, vzp_avg,
                              1);
 
-          // sum mass, energy, and momentum before
+          // sum mass, kintetic energy, and momentum before injection.
+          // mass and momentum are useful for debugging;
+          // only kinetic energy will be used.
           double mass_old, ke_old_explosion, mom_old;
           sum_energy_momentum(d, vx, vy, vz,
                               ix, iy, iz,
                               mass_old, ke_old_explosion, mom_old);
 
           // Zero dummy grids
-          for (int i=0; i<=2; i++){
+          // use kji for faster CelloView access
+          for (int k=0; k<=2; k++){
             for (int j=0; j<=2; j++){
-              for (int k=0; k<=2; k++){
+              for (int i=0; i<=2; i++){
 
                 px1(i,j,k) = 0.0;
                 py1(i,j,k) = 0.0;
@@ -983,7 +990,7 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
             cap_velocity_kick_
           );
 
-          // sum mass, energy, and momentum in particle frame (dummy grids)
+          // sum mass, KE, and momentum in particle frame (dummy grids)
           double mass_dummy, ke_dummy_explosion, mom_dummy;
           sum_energy_momentum(d1, px1, py1, pz1,
                               1, 1, 1,  // center of dummy grid
@@ -1005,7 +1012,7 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
             cap_velocity_kick_
           );
 
-          // sum mass, energy, and momentum after injection
+          // sum mass, KE, and momentum after injection
           double mass_new, ke_new_explosion, mom_new;
           sum_energy_momentum(d, vx, vy, vz,
                               ix, iy, iz,
@@ -1014,8 +1021,10 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           // The KE added to real grid can be less than added to the dummy
           // because of momentum cancellation
           // If this is true, add the missing energy as thermal energy
-          double ke_deficit = ke_dummy_explosion - (ke_new_explosion - ke_old_explosion);
+          double ke_injected = ke_new_explosion - ke_old_explosion;
+          double ke_deficit = ke_dummy_explosion - ke_injected;
           ke_deficit = std::max(ke_deficit, 0.0); // must be positive
+          double ke_deficit_per_cell = ke_deficit / fb_cells;
 
           // Convert momenta back to velocities & transform to simulation frame
           transform_momentum(d, vx, vy, vz,
@@ -1024,15 +1033,27 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
                              -1);
 
           // Track change in KE in the total energy field
-          // and inject both energy lost due to momentum cancellation (ke_deficit)
-          // and energy from resolved Sedov-Taylor phase (eng_per_cell) as thermal energy
-          for (int i=-1; i<=1; i++){
+          // and inject both energy lost due to momentum cancellation (ke_deficit_per_cell)
+          // and energy from resolved Sedov-Taylor phase (eng_per_cell) as thermal energy.
+          // Note that we have to recalculate the KE because of the frame change.
+          for (int k=-1; k<=1; k++){
             for (int j=-1; j<=1; j++){
-              for (int k=-1; k<=1; k++){
-              }
+              for (int i=-1; i<=1; i++){
+
+                double ke_new_grid = 0.5 * d(ix+i, iy+j, iz+k) * (
+                  vx(ix+i, iy+j, iz+k)*vx(ix+i, iy+j, iz+k) +
+                  vy(ix+i, iy+j, iz+k)*vy(ix+i, iy+j, iz+k) +
+                  vz(ix+i, iy+j, iz+k)*vz(ix+i, iy+j, iz+k)
+                );
+                double ke_added = ke_new_grid - ke_old_grid[i+1][j+1][k+1];
+                double ge_added = ke_deficit_per_cell + eng_per_cell[i+1][j+1][k+1];
+
+                te_dep(ix+i, iy+j, iz+k) += (ke_added+ge_added) / d(ix+i, iy+j, iz+k);
+                ge_dep(ix+i, iy+j, iz+k) += ge_added / d(ix+i, iy+j, iz+k);
+              } // end loop over local z
             }
           }
-        }
+        } // end loop over grid z
       }
     }
 
