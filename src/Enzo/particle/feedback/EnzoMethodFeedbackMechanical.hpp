@@ -61,11 +61,14 @@ protected:
     field.allocate_temporary(i_yld_nsn);
     field.allocate_temporary(i_yld_mass);
     field.allocate_temporary(i_yld_metl);
-    field.allocate_temporary(i_yld_snii);
-    field.allocate_temporary(i_yld_snia);
     field.allocate_temporary(i_yld_vxp);
     field.allocate_temporary(i_yld_vyp);
     field.allocate_temporary(i_yld_vzp);
+
+    if (track_metal_sources_) {
+      field.allocate_temporary(i_yld_snii);
+      field.allocate_temporary(i_yld_snia);
+    }
   }
 
   void deallocate_temporary_yields_(EnzoBlock * enzo_block)
@@ -74,16 +77,22 @@ protected:
     field.deallocate_temporary(i_yld_nsn);
     field.deallocate_temporary(i_yld_mass);
     field.deallocate_temporary(i_yld_metl);
-    field.deallocate_temporary(i_yld_snii);
-    field.deallocate_temporary(i_yld_snia);
     field.deallocate_temporary(i_yld_vxp);
     field.deallocate_temporary(i_yld_vyp);
     field.deallocate_temporary(i_yld_vzp);
+    
+    if (track_metal_sources_) {
+      field.deallocate_temporary(i_yld_snii);
+      field.deallocate_temporary(i_yld_snia);
+    }
   }
 
   void allocate_temporary_fluids_(EnzoBlock * enzo_block)
   {
     Field field = enzo_block->data()->field();
+
+    field.allocate_temporary(i_mu);
+
     field.allocate_temporary(i_d_dep);
     field.allocate_temporary(i_te_dep);
     field.allocate_temporary(i_ge_dep);
@@ -111,6 +120,9 @@ protected:
   void deallocate_temporary_fluids_(EnzoBlock * enzo_block)
   {
     Field field = enzo_block->data()->field();
+
+    field.deallocate_temporary(i_mu);
+
     field.deallocate_temporary(i_d_dep);
     field.deallocate_temporary(i_te_dep);
     field.deallocate_temporary(i_ge_dep);
@@ -135,6 +147,8 @@ protected:
     }
   }
 
+  void compute_molecular_weight_(EnzoBlock * enzo_block);
+
   // configuration parameters (these are directly set by the user)
   bool stochastic_;
   bool pre_sne_;
@@ -147,6 +161,9 @@ protected:
 
   // Refresh ID
   int ir_feedback_;
+
+  // a temporary field for mean molecular weight
+  int i_mu;
 
   // deposit field id's
   // these are used for figuring out feedback
