@@ -136,12 +136,15 @@ void compute_snii_energy_momentum(
   double vunit = enzo_units->velocity();
   double lunit = enzo_units->length();
   double tunit = enzo_units->time();
+  double volunit = enzo_units -> volume();
+
+  double vol_cgs = vol_cell * volunit;
 
   // Convert several Fortran expressions to C++.
   const double ergs_51_sqr = std::pow(10.0, 51.0/2.0); // matches Fortran 10**(51/2)
   const double Nnbors = distcells - 1; // 26 for 3^3
   const double betaSN = 1.0 / static_cast<double>(distcells); // 1/27
-  const double Mej = mass_per_cell * static_cast<double>(distcells) * dunit * vol_cell; // cgs mass
+  const double Mej = mass_per_cell * static_cast<double>(distcells) * dunit * vol_cgs; // cgs mass
   const double SN_energy_unit = std::pow(10.0,51.0); // 1e51 (cgs)
   const double SN_energy = (Nnbors > 0.0) ? (nsn * SN_energy_unit / Nnbors) : 0.0;
 
@@ -160,11 +163,10 @@ void compute_snii_energy_momentum(
         const int kk = kc + k;
 
         // assume caller avoids boundaries (as in original Fortran)
-        double den_cell = d(ii,jj,kk) * dunit; // cgs density
+        double d_nbor_cell = d(ii,jj,kk) * dunit; // cgs density
         double dMej = ((1.0 - betaSN) * Mej) / Nnbors;
-
-        double dMswept = den_cell * vol_cell_oct
-                       + ((1.0 - betaSN) * d_fbck_cell * dunit * vol_cell) / Nnbors
+        double dMswept = d_nbor_cell * vol_cell_oct*volunit
+                       + ((1.0 - betaSN) * d_fbck_cell * dunit * vol_cgs) / Nnbors
                        + dMej;
         double chi = dMswept / dMej;
 
@@ -181,12 +183,12 @@ void compute_snii_energy_momentum(
           pSN = mom_mult * std::sqrt(tmp) * ergs_51_sqr;  // cgs
 
           // kinetic energy from momentum (compare to SN_energy),
-          double denom = den_cell * vol_cell + dMej;
+          double denom = d_nbor_cell * vol_cgs + dMej;
           double ke_from_p = (denom > 0.0) ? 0.5 * std::pow(pSN / Nnbors, 2) / denom : 0.0;
 
           if (ke_from_p < SN_energy) {
             // add thermal energy (code units) to get up to 10^51 erg
-            energy_term = (SN_energy - ke_from_p) / (dunit * vol_cell * vunit * vunit);
+            energy_term = (SN_energy - ke_from_p) / (dunit * vol_cgs * vunit * vunit);
           } else {
             energy_term = 0.0;
           }
@@ -205,7 +207,7 @@ void compute_snii_energy_momentum(
 
         // Convert pSN from cgs (as constructed above) to code units:
         if (Nnbors > 0.0) {  // again, copilot is being very careful but I appreciate it
-          pSN = pSN / (dunit * vol_cell * vunit * Nnbors);
+          pSN = pSN / (dunit * vol_cgs * vunit * Nnbors);
         } else {
           pSN = 0.0;
         }
@@ -327,7 +329,6 @@ void add_feedback_SNe(
   const double mass_per_cell,
   const double mom_per_cell[3][3][3],
   const double mzeject, const double mzeject_ia, const double mzeject_ii,
-  const double cell_volume,
   const bool track_metal_sources_,
   const bool cap_velocity_kick
 ) {
@@ -407,21 +408,21 @@ void add_feedback_SNe(
         ge(ii,jj,kk) = static_cast<enzo_float>( static_cast<double>(ge(ii,jj,kk)) * dratio );
 
         if (!metals.is_null()) {
-          double metal_old = static_cast<double>(metals(ii,jj,kk)); // metal density
-          double metal_new = metal_old + mzeject;
-          double mf_new = std::max(metal_new / new_dens, 0.95); // Cap metal fraction at 0.95
+          double md_old = static_cast<double>(metals(ii,jj,kk)); // metal density
+          double md_new = md_old + mzeject;
+          double mf_new = std::max(md_new / new_dens, 0.95); // Cap metal fraction at 0.95
           metals(ii,jj,kk) = static_cast<enzo_float>(mf_new) * new_dens;
         }
 
         if (track_metal_sources_ && !metalSNII.is_null() && !metalSNIa.is_null()) {
-          double mzii_old = static_cast<double>(metalSNII(ii,jj,kk));
-          double mzia_old = static_cast<double>(metalSNIa(ii,jj,kk));
+          double mdii_old = static_cast<double>(metalSNII(ii,jj,kk));
+          double mdia_old = static_cast<double>(metalSNIa(ii,jj,kk));
 
-          double mzii_new = mzii_old + mzeject_ii;
-          double mzia_new = mzia_old + mzeject_ia;
+          double mdii_new = mdii_old + mzeject_ii;
+          double mdia_new = mdia_old + mzeject_ia;
 
-          double mfii_new = std::max(mzii_new / new_dens, 0.95);
-          double mfia_new = std::max(mzia_new / new_dens, 0.95);
+          double mfii_new = std::max(mdii_new / new_dens, 0.95);
+          double mfia_new = std::max(mdia_new / new_dens, 0.95);
 
           metalSNII(ii,jj,kk) = static_cast<enzo_float>(mfii_new) * new_dens;
           metalSNIa(ii,jj,kk) = static_cast<enzo_float>(mfia_new) * new_dens;
@@ -460,6 +461,7 @@ EnzoMethodFeedbackMechanical::EnzoMethodFeedbackMechanical(ParameterGroup p)
   momentum_mult_         = p.value_float("momentum_multiplier",1.0);
   cap_velocity_kick_     = p.value_logical("cap_velocity_kick",true);
   track_metal_sources_   = p.value_logical("track_metal_sources",true);
+  debug_fb_stderr_       = p.value_logical("debug_feedback_in_stderr",false);
 
   // required fields
   cello::define_field("density");
@@ -636,6 +638,7 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
   double lunit = enzo_units->length();
   double tunit = enzo_units->time();
   double dunit = enzo_units->density();
+  double volunit = enzo_units->volume();
 
   double current_time  = block->time();
 
@@ -654,8 +657,10 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
   my = ny + 2*gy;
   mz = nz + 2*gz;
 
-  double cell_volume = hx*hy*hz;  // TODO does this need to account for cosmology?
-  double cell_volume_octant = cell_volume/8;
+  double cell_volume = hx*hy*hz; // code units; TODO does this need to account for cosmology?
+  double cell_volume_octant = cell_volume/8; // code units
+  // TODO do I need cell_vol in code (current) or cell_vol in cgs?
+  double rho_to_m = dunit * cell_volume*volunit / enzo_constants::mass_solar; // from code_density to mass in Msun
   int fb_cells = 27; // number of cells in feedback region (3^3 cube)
 
   const int rank = cello::rank();
@@ -692,8 +697,8 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
 
     // initialize temporary fields as zero
     CelloView<enzo_float,3> nsn_yld  = field.view<enzo_float>(i_yld_nsn);
-    CelloView<enzo_float,3> m_yld  = field.view<enzo_float>(i_yld_mass);
-    CelloView<enzo_float,3> mz_yld = field.view<enzo_float>(i_yld_metl);
+    CelloView<enzo_float,3> d_yld  = field.view<enzo_float>(i_yld_mass);
+    CelloView<enzo_float,3> md_yld = field.view<enzo_float>(i_yld_metl);
     CelloView<enzo_float,3> vxp_yld = field.view<enzo_float>(i_yld_vxp);
     CelloView<enzo_float,3> vyp_yld = field.view<enzo_float>(i_yld_vyp);
     CelloView<enzo_float,3> vzp_yld = field.view<enzo_float>(i_yld_vzp);
@@ -714,12 +719,12 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
     CelloView<enzo_float,3> vy_dep_a = field.view<enzo_float>(i_vy_dep_a);
     CelloView<enzo_float,3> vz_dep_a = field.view<enzo_float>(i_vz_dep_a);
     
-    CelloView<enzo_float,3> mzii_yld, mzia_yld;  // uninitialized acts as nullptr
+    CelloView<enzo_float,3> mdii_yld, mdia_yld;  // uninitialized acts as nullptr
     CelloView<enzo_float,3> mdii_dep, mdia_dep;
     CelloView<enzo_float,3> mdii_dep_a, mdia_dep_a;
     if (track_metal_sources_) {
-      mzii_yld = field.view<enzo_float>(i_yld_snii);
-      mzia_yld = field.view<enzo_float>(i_yld_snia);
+      mdii_yld = field.view<enzo_float>(i_yld_snii);
+      mdia_yld = field.view<enzo_float>(i_yld_snia);
 
       mdii_dep = field.view<enzo_float>(i_mdii_dep);
       mdia_dep = field.view<enzo_float>(i_mdia_dep);
@@ -733,8 +738,8 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
       for (int iy=0; iy<my; iy++) {
         for (int ix=0; ix<my; ix++) {
           nsn_yld (ix, iy, iz) = 0.0;
-          m_yld (ix, iy, iz) = 0.0;
-          mz_yld(ix, iy, iz) = 0.0;
+          d_yld (ix, iy, iz) = 0.0;
+          md_yld(ix, iy, iz) = 0.0;
           vxp_yld(ix, iy, iz) = 0.0;
           vyp_yld(ix, iy, iz) = 0.0;
           vzp_yld(ix, iy, iz) = 0.0;
@@ -756,8 +761,8 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           vz_dep_a(ix, iy, iz) = 0.0;
 
           if (track_metal_sources_) {
-            mzii_yld(ix, iy, iz) = 0.0;
-            mzia_yld(ix, iy, iz) = 0.0;
+            mdii_yld(ix, iy, iz) = 0.0;
+            mdia_yld(ix, iy, iz) = 0.0;
 
             mdii_dep(ix, iy, iz) = 0.0;
             mdia_dep(ix, iy, iz) = 0.0;
@@ -829,9 +834,10 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           const double age = (current_time - pcreation[ip_c]) * enzo_units->time() / enzo_constants::Myr_s;
 
           // Get yields from tables
-          double nsn, nsn_ii, nsn_ia, mej, mej_ii, mej_ia,
-            mzej, mzej_ii, mzej_ia;
-          // TODO ensure metal yields are returned as densities
+          double nsn, nsn_ii, nsn_ia, dej, dej_ii, dej_ia,
+            mdej, mdej_ii, mdej_ia;
+          // TODO ensure mass & metal yields are returned as densities.
+          // Note that particle masses are NOT densities
 
           // Stochasitcally sample a Poisson distribution using the expected
           // number of SNe as the mean.
@@ -846,31 +852,31 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
             // and then scale to the current particle mass.
             // User ejecta fraction parameters serve as a limit
             if (nsn_ii_sto > 0.0) {
-              mej_ii = std::min(
-                (mej_ii/nsn_ii * nsn_ii_sto) * pmass[ip_m]/pimass[ip_im],
-                ejecta_mass_fraction_ * pmass[ip_m]
+              dej_ii = std::min(
+                (dej_ii/nsn_ii * nsn_ii_sto) * pmass[ip_m]/pimass[ip_im],
+                ejecta_mass_fraction_ * pmass[ip_m]/cell_volume
               );
-              mzej_ii = std::min(
-                (mzej_ii/nsn_ii * nsn_ii_sto) * pmass[ip_m]/pimass[ip_im],
-                ejecta_metal_fraction_ * pmass[ip_m]  // TODO ensure particle mass is a density
+              mdej_ii = std::min(
+                (mdej_ii/nsn_ii * nsn_ii_sto) * pmass[ip_m]/pimass[ip_im],
+                ejecta_metal_fraction_ * pmass[ip_m]/cell_volume
               );
             } else {
-              mej_ii = 0.0;
-              mzej_ii = 0.0;
+              dej_ii = 0.0;
+              mdej_ii = 0.0;
             }
 
             if (nsn_ia_sto > 0.0) {
-              mej_ia = std::min(
-                (mej_ia/nsn_ia * nsn_ia_sto) * pmass[ip_m]/pimass[ip_im],
-                ejecta_mass_fraction_ * pmass[ip_m]
+              dej_ia = std::min(
+                (dej_ia/nsn_ia * nsn_ia_sto) * pmass[ip_m]/pimass[ip_im],
+                ejecta_mass_fraction_ * pmass[ip_m]/cell_volume
               );
-              mzej_ia = std::min(
-                (mzej_ia/nsn_ia * nsn_ia_sto) * pmass[ip_m]/pimass[ip_im],
-                ejecta_metal_fraction_ * pmass[ip_m]
+              mdej_ia = std::min(
+                (mdej_ia/nsn_ia * nsn_ia_sto) * pmass[ip_m]/pimass[ip_im],
+                ejecta_metal_fraction_ * pmass[ip_m]/cell_volume
               );
             } else {
-              mej_ia = 0.0;
-              mzej_ia = 0.0;
+              dej_ia = 0.0;
+              mdej_ia = 0.0;
             }
 
             // reset SNe numbers to those that were drawn
@@ -883,16 +889,28 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           if (nsn < min_nsn_per_timestep_)
             nsn = 0.0;
 
-          mej = mej_ii + mej_ia;
-          mzej = mzej_ii + mzej_ia;
-
+          dej = dej_ii + dej_ia;
+          mdej = mdej_ii + mdej_ia;
+          
+          if (debug_fb_stderr_) {
+            // dump all the yield info so far
+            CkPrintf(
+              "\tnsn: %g\n\tnsn_ii: %g\n\tnsn_ia: %g\n"
+              "\tmej: %g\n\tmej_ii: %g\n\tmej_ia: %g\n"
+              "\tmzej: %g\n\tmzej_ii: %g\n\tmzej_ia: %g\n",
+              nsn, nsn_ii, nsn_ia,
+              dej * rho_to_m, dej_ii * rho_to_m, dej_ia * rho_to_m,
+              mdej * rho_to_m, mdej_ii * rho_to_m, mdej_ia * rho_to_m
+            );
+          }
+          
           // Calculate energy yield
           double energy = nsn * 1.0e51; // in ergs
           energy = energy / (munit * lunit*lunit / (tunit*tunit)); // code units
           energy = energy / cell_volume; // energy per unit volume
 
-          // Subtract mass from particle
-          pmass[ip_m] -= mej * enzo_constants::mass_solar / munit;
+          // Subtract mass from particle (particle mass is not a density like in Enzo!)
+          pmass[ip_m] -= dej * rho_to_m;
           
           // Get position of particle in space
           double x = px[ip_p];
@@ -909,11 +927,11 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           // Store yields in temporary grids
           // so we can sum over all particles a given cell
           nsn_yld(ix, iy, iz) += (enzo_float) nsn;
-          m_yld(ix, iy, iz) += (enzo_float) mej;
-          mz_yld(ix, iy, iz) += (enzo_float) mzej;
+          d_yld(ix, iy, iz) += (enzo_float) dej;
+          md_yld(ix, iy, iz) += (enzo_float) mdej;
           if (track_metal_sources_) {
-            mzii_yld(ix, iy, iz) += (enzo_float) mzej_ii;
-            mzia_yld(ix, iy, iz) += (enzo_float) mzej_ia;
+            mdii_yld(ix, iy, iz) += (enzo_float) mdej_ii;
+            mdia_yld(ix, iy, iz) += (enzo_float) mdej_ia;
           }
 
           // Weight avg velocity by number of SNe going off
@@ -958,11 +976,11 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
           avg_n /= fb_cells;
 
           // Compute mass, momentum, & energy this cell is responsible for injecting
-          m_per_cell = m_yld(ix, iy, iz) / fb_cells;
-          mz_per_cell = mz_yld(ix, iy, iz) / fb_cells;
+          m_per_cell = d_yld(ix, iy, iz) / fb_cells;
+          mz_per_cell = md_yld(ix, iy, iz) / fb_cells;
           if (track_metal_sources_) {  // these are initialized to zero
-            mzii_per_cell = mzii_yld(ix, iy, iz) / fb_cells;
-            mzia_per_cell = mzia_yld(ix, iy, iz) / fb_cells;
+            mzii_per_cell = mdii_yld(ix, iy, iz) / fb_cells;
+            mzia_per_cell = mdia_yld(ix, iy, iz) / fb_cells;
           }
 
           compute_snii_energy_momentum(
@@ -1047,7 +1065,6 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
             m_per_cell,
             mom_per_cell,
             0.0, 0.0, 0.0,    // no metals in dummy
-            cell_volume,
             track_metal_sources_,
             cap_velocity_kick_
           );
@@ -1071,7 +1088,6 @@ void EnzoMethodFeedbackMechanical::compute_ (Block * block)
             mz_per_cell,
             mzii_per_cell,
             mzia_per_cell,
-            cell_volume,
             track_metal_sources_,
             cap_velocity_kick_
           );

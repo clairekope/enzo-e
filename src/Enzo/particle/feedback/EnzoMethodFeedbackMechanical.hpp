@@ -158,6 +158,7 @@ protected:
   double momentum_mult_;
   bool cap_velocity_kick_;
   bool track_metal_sources_;
+  bool debug_fb_stderr_;
 
   // Refresh ID
   int ir_feedback_;
